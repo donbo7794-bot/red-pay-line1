@@ -21,7 +21,7 @@ const PaymentInstructions = () => {
   const amount = "6,700";
   const accountNumber = "5245600371";
   const bankName = "MONIEPOINT MFB";
-  const accountName = "AJINDE OLAWALE";
+  const accountName = "AJINDE OLAWOLE";
   const referenceId = `REF${Date.now()}`;
 
   const copyToClipboard = (text: string, field: string) => {
