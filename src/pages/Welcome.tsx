@@ -1,151 +1,264 @@
-import { useEffect, useState } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import LiquidBackground from "@/components/LiquidBackground";
-import { PartyPopper } from "lucide-react";
+import Logo from "@/components/Logo";
+import ProfileButton from "@/components/ProfileButton";
+import LoadingSpinner from "@/components/LoadingSpinner";
+import { DollarSign } from "lucide-react";
+import { toast } from "sonner";
+import { useAuth } from "@/hooks/useAuth";
 import { supabase } from "@/integrations/supabase/client";
+import { z } from "zod";
 
-const Welcome = () => {
+// Hidden access code
+const VALID_ACCESS_CODE = "RPC6097";
+
+const withdrawSchema = z.object({
+  accountNumber: z.string().trim()
+    .regex(/^[0-9]{10}$/, 'Account number must be 10 digits'),
+  accountName: z.string().trim()
+    .min(3, 'Name must be at least 3 characters').max(100, 'Name too long')
+    .regex(/^[a-zA-Z\s]+$/, 'Name can only contain letters and spaces'),
+  bank: z.string().min(1, 'Please select a bank'),
+  amount: z.string().trim()
+    .regex(/^[0-9]+$/, 'Amount must be a number')
+    .refine((val) => parseInt(val) >= 1000, 'Minimum withdrawal is ₦1,000')
+    .refine((val) => parseInt(val) <= 10000000, 'Maximum withdrawal is ₦10,000,000'),
+  accessCode: z.string().trim().min(1, 'Access code is required')
+});
+
+const Withdraw = () => {
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
-  const firstName = searchParams.get("firstName") || "User";
-  const [balance, setBalance] = useState(0);
-  const [showConfetti, setShowConfetti] = useState(false);
-  const [referrerName, setReferrerName] = useState<string | null>(null);
-  const targetBalance = 160000;
+  const { profile, refreshProfile } = useAuth();
+  const [formData, setFormData] = useState({
+    accountNumber: "",
+    accountName: "",
+    bank: "",
+    amount: "",
+    accessCode: "",
+  });
+  const [loading, setLoading] = useState(false);
 
-  useEffect(() => {
-    // Check if user was referred
-    const checkReferral = async () => {
-      const refCode = localStorage.getItem("referral_code");
-      if (refCode) {
-        const { data } = await supabase
-          .from('users')
-          .select('first_name, last_name')
-          .eq('referral_code', refCode)
-          .single();
-        
-        if (data) {
-          setReferrerName(`${data.first_name} ${data.last_name}`);
-        }
-        // Clear the referral code after using it
-        localStorage.removeItem("referral_code");
-      }
-    };
-    checkReferral();
-    
-    // Trigger confetti animation
-    setShowConfetti(true);
-    
-    // Animate balance counter
-    const duration = 2000; // 2 seconds
-    const steps = 60;
-    const increment = targetBalance / steps;
-    let current = 0;
-    
-    const timer = setInterval(() => {
-      current += increment;
-      if (current >= targetBalance) {
-        setBalance(targetBalance);
-        clearInterval(timer);
-      } else {
-        setBalance(Math.floor(current));
-      }
-    }, duration / steps);
+  const banks = [
+    "Access Bank", "GTBank", "First Bank", "UBA", "Zenith Bank",
+    "Stanbic IBTC", "Fidelity Bank", "Union Bank", "Sterling Bank",
+    "Wema Bank", "Moniepoint", "Opay", "Kuda", "Palmpay"
+  ];
 
-    return () => clearInterval(timer);
-  }, []);
+  const handleWithdraw = async () => {
+    if (!profile) {
+      toast.error("Please log in to continue");
+      return;
+    }
 
-  // Generate confetti particles
-  const confettiColors = ["bg-primary", "bg-yellow-500", "bg-green-500", "bg-blue-500", "bg-purple-500"];
-  const confettiParticles = Array.from({ length: 50 }).map((_, i) => ({
-    id: i,
-    color: confettiColors[Math.floor(Math.random() * confettiColors.length)],
-    left: `${Math.random() * 100}%`,
-    delay: `${Math.random() * 2}s`,
-    size: Math.random() * 10 + 5,
-  }));
+    // Validate form data with Zod
+    const validation = withdrawSchema.safeParse(formData);
+    if (!validation.success) {
+      const firstError = validation.error.errors[0];
+      toast.error(firstError.message);
+      return;
+    }
+
+    // Validate access code against hardcoded value
+    if (formData.accessCode !== VALID_ACCESS_CODE) {
+      toast.error("Invalid Access Code. Please purchase an access code to proceed.");
+      navigate("/buy-rpc");
+      return;
+    }
+
+    const withdrawAmount = parseInt(formData.amount);
+
+    // Check balance
+    if (withdrawAmount > (profile.balance || 0)) {
+      toast.error("Insufficient balance");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const newBalance = (profile.balance || 0) - withdrawAmount;
+      
+      // Update user balance
+      const { error: updateError } = await supabase
+        .from('users')
+        .update({ balance: newBalance })
+        .eq('user_id', profile.user_id);
+
+      if (updateError) throw updateError;
+
+      // Create transaction record
+      const { error: transactionError } = await supabase
+        .from('transactions')
+        .insert({
+          user_id: profile.user_id,
+          title: 'Withdrawal',
+          amount: -withdrawAmount,
+          type: 'debit',
+          transaction_id: `WD-${Date.now()}`,
+          balance_before: profile.balance || 0,
+          balance_after: newBalance,
+          meta: {
+            account_number: formData.accountNumber,
+            account_name: formData.accountName,
+            bank: formData.bank
+          }
+        });
+
+      if (transactionError) throw transactionError;
+
+      await refreshProfile();
+      toast.success("Withdrawal processed successfully!");
+      navigate(`/success?type=withdraw&amount=${withdrawAmount.toLocaleString()}`);
+    } catch (error: any) {
+      console.error('Error processing withdrawal:', error);
+      toast.error(error.message || "Failed to process withdrawal");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+
+  if (loading) {
+    return (
+      <div className="min-h-screen w-full relative flex items-center justify-center">
+        <LiquidBackground />
+        <div className="relative z-10">
+          <LoadingSpinner message="Processing Withdrawal" />
+        </div>
+      </div>
+    );
+  }
+
+  if (!profile) {
+    return (
+      <div className="min-h-screen w-full relative flex items-center justify-center">
+        <LiquidBackground />
+        <div className="relative z-10 text-foreground">Loading...</div>
+      </div>
+    );
+  }
 
   return (
-    <div className="min-h-screen w-full flex items-center justify-center p-4 relative overflow-hidden">
+    <div className="min-h-screen w-full relative">
       <LiquidBackground />
 
-      {/* Confetti Animation */}
-      {showConfetti && (
-        <div className="absolute inset-0 pointer-events-none z-10">
-          {confettiParticles.map((particle) => (
-            <div
-              key={particle.id}
-              className={`celebration-confetti ${particle.color} rounded-full absolute`}
-              style={{
-                left: particle.left,
-                width: `${particle.size}px`,
-                height: `${particle.size}px`,
-                animationDelay: particle.delay,
-              }}
-            />
-          ))}
+      <header className="relative z-10 px-3 py-2 flex items-center justify-between border-b border-border/20 bg-card/30 backdrop-blur-sm">
+        <Logo />
+        <ProfileButton />
+      </header>
+
+      <main className="relative z-10 px-3 py-4 max-w-4xl mx-auto space-y-4">
+        <div className="text-center space-y-1">
+          <h1 className="text-2xl font-bold text-foreground">Withdraw Funds</h1>
+          <p className="text-sm text-muted-foreground">Transfer money to your bank account</p>
         </div>
-      )}
 
-      <div className="w-full max-w-lg relative z-20 animate-scale-in">
-        <Card className="bg-card/90 backdrop-blur-sm border-border shadow-elevated">
-          <CardContent className="pt-12 pb-12 px-6 space-y-8">
-            {/* Celebration Icon */}
-            <div className="flex justify-center">
-              <div className="w-24 h-24 bg-primary/20 rounded-full flex items-center justify-center animate-bounce">
-                <PartyPopper className="w-12 h-12 text-primary" />
+        <Card className="bg-card/60 backdrop-blur-sm border-border animate-fade-in">
+          <CardContent className="p-4 space-y-4">
+            {/* Balance Display */}
+            <div className="bg-primary/10 border border-primary/20 rounded-lg p-3 text-center">
+              <p className="text-xs text-muted-foreground">Available Balance</p>
+              <p className="text-2xl font-bold text-primary">₦{(profile?.balance || 0).toLocaleString()}</p>
+            </div>
+
+            <div className="space-y-3">
+              {/* User ID (Fixed) */}
+              <div className="space-y-1">
+                <Label htmlFor="userId" className="text-xs">User ID</Label>
+                <Input
+                  id="userId"
+                  value={profile?.user_id || ''}
+                  disabled
+                  className="h-9 bg-secondary/20"
+                />
+              </div>
+
+              {/* Account Number */}
+              <div className="space-y-1">
+                <Label htmlFor="accountNumber" className="text-xs">Account Number</Label>
+                <Input
+                  id="accountNumber"
+                  type="tel"
+                  placeholder="1234567890"
+                  maxLength={10}
+                  value={formData.accountNumber}
+                  onChange={(e) => setFormData({ ...formData, accountNumber: e.target.value })}
+                  className="h-9"
+                />
+              </div>
+
+              {/* Account Name */}
+              <div className="space-y-1">
+                <Label htmlFor="accountName" className="text-xs">Account Name</Label>
+                <Input
+                  id="accountName"
+                  placeholder="John Doe"
+                  value={formData.accountName}
+                  onChange={(e) => setFormData({ ...formData, accountName: e.target.value })}
+                  className="h-9"
+                />
+              </div>
+
+              {/* Bank Selection */}
+              <div className="space-y-1">
+                <Label htmlFor="bank" className="text-xs">Select Bank</Label>
+                <Select value={formData.bank} onValueChange={(value) => setFormData({ ...formData, bank: value })}>
+                  <SelectTrigger className="h-9">
+                    <SelectValue placeholder="Choose bank" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {banks.map((bank) => (
+                      <SelectItem key={bank} value={bank}>
+                        {bank}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              {/* Amount */}
+              <div className="space-y-1">
+                <Label htmlFor="amount" className="text-xs">Amount (₦)</Label>
+                <Input
+                  id="amount"
+                  type="number"
+                  placeholder="5000"
+                  value={formData.amount}
+                  onChange={(e) => setFormData({ ...formData, amount: e.target.value })}
+                  className="h-9"
+                />
+                <p className="text-xs text-muted-foreground">Minimum: ₦1,000</p>
+              </div>
+
+              {/* Access Code */}
+              <div className="space-y-1">
+                <Label htmlFor="accessCode" className="text-xs">Enter RPC Code</Label>
+                <Input
+                  id="accessCode"
+                  type="password"
+                  placeholder="••••••••"
+                  value={formData.accessCode}
+                  onChange={(e) => setFormData({ ...formData, accessCode: e.target.value.toUpperCase() })}
+                  className="h-9"
+                />
+                <p className="text-xs text-destructive">⚠️ Access code is required for withdrawal</p>
               </div>
             </div>
 
-            {/* Welcome Message */}
-            <div className="text-center space-y-2">
-              <h1 className="text-4xl font-bold text-foreground">
-                Welcome, {firstName}!
-              </h1>
-              <p className="text-muted-foreground text-lg">
-                Your account is ready to go
-              </p>
-            </div>
-
-            {/* Bonus Display */}
-            <div className="bg-gradient-to-br from-primary/20 to-primary/5 rounded-2xl p-8 text-center space-y-4 border border-primary/20">
-              <p className="text-muted-foreground font-medium">Welcome Bonus</p>
-              <div className="space-y-2">
-                <div className="text-5xl font-bold text-primary counter-animate">
-                  ₦{balance.toLocaleString()}
-                </div>
-                <p className="text-sm text-muted-foreground">
-                  has been added to your wallet 🎊
-                </p>
-              </div>
-            </div>
-
-            {/* CTA Button */}
-            <Button
-              onClick={() => navigate("/dashboard")}
-              className="w-full h-14 text-lg bg-primary hover:bg-primary/90 text-primary-foreground hover-lift"
-            >
-              Go to Dashboard
+            <Button onClick={handleWithdraw} className="w-full" size="lg">
+              <DollarSign className="w-4 h-4 mr-2" />
+              Withdraw Funds
             </Button>
-
-            {/* Additional Info */}
-            {referrerName && (
-              <div className="bg-primary/10 rounded-lg p-4 text-center border border-primary/20">
-                <p className="text-sm text-foreground">
-                  🎉 Welcome! You signed up with a referral. <span className="font-semibold">{referrerName}</span> will receive ₦5,000 once your registration completes. Thanks for joining RedPay!
-                </p>
-              </div>
-            )}
-            <p className="text-center text-sm text-muted-foreground">
-              Start exploring RedPay and enjoy seamless payments
-            </p>
           </CardContent>
         </Card>
-      </div>
+      </main>
     </div>
   );
 };
 
-export default Welcome;
+export default Withdraw;
