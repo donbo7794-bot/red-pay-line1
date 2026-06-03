@@ -18,7 +18,7 @@ const PaymentInstructions = () => {
   const [loading, setLoading] = useState(false);
   const [showFailure, setShowFailure] = useState(false);
 
-  const amount = "10,750";
+  const amount = "10,500";
   const accountNumber = "5924391413";
   const bankName = "MONIEPOINT MFB";
   const accountName = "BUKONLA OYEWUNMI";
